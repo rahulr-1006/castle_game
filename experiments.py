@@ -366,7 +366,7 @@ def run_game1(worlds, rng, sizes):
     return {"fp": fp, "table": table, "levels": levels_table, "crossover": crossover,
             "switches": switches, "focal": focal, "cands": cands, "scores": scores,
             "worlds_table": worlds_table, "marg_prior": marg_prior, "w_prior": w_prior,
-            "level0": level0, "ch": ch, "best_value": best_value}
+            "level0": level0, "ch": ch, "best_value": best_value, "fields": fields}
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +522,7 @@ def run_game2(worlds, rng, sizes, g1):
         game2_best=[fmt(a) for a, _ in world_best], game2_best_payout=[v for _, v in world_best])
     worlds_table.to_csv(RESULTS / "worlds.csv", index=False)
     return {"table": table, "crossover": crossover, "switches": switches, "eq_trace": eq_trace,
-            "cands": cands, "mean": mean}
+            "cands": cands, "mean": mean, "fields": fields}
 
 
 def noise_calibration(rng):
@@ -540,6 +540,53 @@ def noise_calibration(rng):
                      "game1_loss_share": g1_loss / best, "game2_lambda": lam2,
                      "game2_loss_payout": g2_loss, "game2_loss_share": g2_loss / r.values.max()})
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Stress test: one more layer of thinking
+# ---------------------------------------------------------------------------
+
+COUNTER_SHARES = (0.1, 0.25)
+
+
+def run_counter_stress(worlds, rng, sizes, g1, g2):
+    """Replace a share of each world with counter-players who best-respond to the whole
+    field, crowd-modelers included (the layer nobody else in the model anticipates),
+    then re-solve: does each game's pick survive?"""
+    p = np.array([wd.weight for wd in worlds])
+    rows = []
+    g1_top = g1["table"].head(4)
+    for share in COUNTER_SHARES:
+        log(f"Counter-player stress test, share {share:g}: Game 1")
+        w = np.array([
+            c.win_value((1 - share) * f + share * c.noisy_response(c.win_value(f), NOISE[wd.noise][0]))
+            for wd, f in zip(worlds, g1["fields"])])
+        best = np.array([c.best_response(x)[1] for x in w])
+        expected, _, max_regret = exhaustive_game1(w, p, best)
+        bayes = c.all_allocations()[expected.argmax()]
+        allocs = [("Bayes under this stress", bayes)] + [
+            (name, np.array([int(x) for x in a.split("-")]))
+            for name, a in zip(g1_top["candidate"], g1_top["allocation"])]
+        for name, a in allocs:
+            scores = np.array([c.expected_score(x, a) for x in w])
+            rows.append({"game": 1, "counter_share": share, "candidate": name, "allocation": fmt(a),
+                         "prior_score": scores @ p, "prior_regret": (best - scores) @ p,
+                         "max_regret": (best - scores).max()})
+
+        log(f"Counter-player stress test, share {share:g}: Game 2")
+        g2_top = g2["table"].head(5)
+        cands = np.array([[int(x) for x in a.split("-")] for a in g2_top["allocation"]])
+        mean = np.empty((len(cands), len(worlds)))
+        for i, (wd, field) in enumerate(zip(worlds, g2["fields"])):
+            counter = c.logit_field(c.game2_response(field, rng, sizes.br_groups), NOISE[wd.noise][1])
+            stressed = c.mix_fields([(1 - share, field), (share, counter)])
+            mean[:, i] = c.payouts(cands, c.face(c.sample_opponents(stressed, sizes.eval_groups, rng))).mean(axis=1)
+        for name, a, m in zip(g2_top["candidate"], g2_top["allocation"], mean):
+            rows.append({"game": 2, "counter_share": share, "candidate": name, "allocation": a,
+                         "prior_score": m @ p, "prior_regret": np.nan, "max_regret": np.nan})
+    table = pd.DataFrame(rows)
+    table.to_csv(RESULTS / "counter_stress.csv", index=False)
+    return table
 
 
 # ---------------------------------------------------------------------------
@@ -645,6 +692,7 @@ def main():
 
     g1 = run_game1(worlds, rng, sizes)
     g2 = run_game2(worlds, rng, sizes, g1)
+    stress = run_counter_stress(worlds, rng, sizes, g1, g2)
 
     pd.set_option("display.width", 200)
     pd.set_option("display.max_colwidth", 45)
@@ -655,6 +703,7 @@ def main():
                                                             "p_outright_first", "worst_score",
                                                             "max_regret"]].head(12).to_string(index=False))
     print("\nGame 2 crossovers\n", g2["switches"].to_string(index=False))
+    print("\nCounter-player stress test\n", stress.round(3).to_string(index=False))
     make_plots()
     log("done")
 

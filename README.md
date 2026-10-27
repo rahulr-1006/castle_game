@@ -71,6 +71,20 @@ the time and averages 6.57 out of 9 (random would be 3.75). Committing to a set 
 My Game 1 pick only scores 3.92 in Game 2, barely above random, so the strategy really does have to
 change between games.
 
+## One more layer
+
+Nobody in the model above anticipates the crowd-modelers. So I added **counter-players**: people
+who best-respond to the whole field, crowd-modelers included (think "the smart people all concede
+castle 5, so I'll steal it"). I swapped 10% or 25% of every world for them and re-solved.
+
+- **Game 1 holds up.** The best answer only shifts to 8-17-29-44-2 (10%) or 7-17-28-45-3 (25%),
+  and my pick is within 0.02 points of it either way.
+- **Game 2 holds at 10%, slips at 25%.** At 10% my pick ties 2-8-4-16-70. At 25% that one wins
+  by 0.22, since the counter-players go after the 18 on castle 1. I'm keeping 18-8-2-2-70 because
+  I don't think a quarter of the field goes five levels deep, but 2-8-4-16-70 is the hedge.
+
+Numbers are in `results/counter_stress.csv`.
+
 ## Caveats
 
 - The prior is my judgment call. The skeptical version is in `results/baseline/` if you want to
