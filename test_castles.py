@@ -358,3 +358,95 @@ def test_cognitive_hierarchy_levels():
     belief = (shares[0] * level0 + shares[1] * exact[1]) / shares.sum()
     np.testing.assert_allclose(exact[2], c.marginals(c.best_response(c.win_value(belief))[0]))
     np.testing.assert_allclose(noisy.sum(axis=2), 1)
+
+
+# ---------------------------------------------------------------------------
+# Game 2 simulator
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("max_cluster", [None, 10, 5])
+def test_payouts_match_reference_rules(max_cluster):
+    rng = np.random.default_rng(13)
+    opps = random_allocs(rng, 3 * 1500, max_cluster).reshape(-1, 3, 5)
+    cands = random_allocs(rng, 12, max_cluster)
+    got = c.payouts(cands, c.face(opps), max_cells=5000)  # small chunks exercise chunking
+    for a, row in zip(cands, got):
+        groups = np.concatenate([np.broadcast_to(a, (len(opps), 1, 5)), opps], axis=1)
+        np.testing.assert_allclose(row, c.game2_payouts(groups)[:, 0])
+
+
+def test_more_than_half_the_points_always_wins_outright():
+    rng = np.random.default_rng(14)
+    groups = random_allocs(rng, 4 * 20_000, max_cluster=10).reshape(-1, 4, 5)
+    pts = c.game2_castle_points(groups)
+    pay = c.game2_payouts(groups)
+    over_half = pts * 2 > c.TOTAL_POINTS * c.SCALE
+    assert over_half.sum() > 1000
+    assert (pay[over_half] == 9).all()
+
+
+def test_exactly_half_the_points_can_still_tie():
+    group = np.array([[10, 0, 45, 45, 0],     # ties castle 1, wins 3 and 4: 7.5
+                      [10, 30, 0, 0, 60],     # ties castle 1, wins 2 and 5: 7.5
+                      [0, 25, 25, 25, 25],
+                      [0, 25, 25, 25, 25]])
+    np.testing.assert_allclose(c.game2_castle_points(group) / c.SCALE, [7.5, 7.5, 0, 0])
+    np.testing.assert_allclose(c.game2_payouts(group), [6.5, 6.5, 1, 1])
+
+
+def test_minimal_eight_point_sets():
+    sets = [s for r in range(1, 6) for s in itertools.combinations(range(1, 6), r) if sum(s) >= 8]
+    minimal = {s for s in sets if not any(set(t) < set(s) for t in sets)}
+    assert minimal == {(3, 5), (4, 5), (1, 2, 5), (1, 3, 4), (2, 3, 4)}
+
+
+def test_castle_share_4way_matches_enumeration():
+    rng = np.random.default_rng(15)
+    allocs = random_allocs(rng, 6, max_cluster=10)
+    probs = rng.dirichlet(np.ones(6))
+    q = c.castle_share_4way(c.marginals(allocs, probs))
+    for castle in range(5):
+        for s in range(0, 101, 5):
+            exact = 0.0
+            for trio in itertools.product(range(6), repeat=3):
+                sent = allocs[list(trio), castle]
+                if s >= sent.max():
+                    exact += np.prod(probs[list(trio)]) / (1 + (sent == s).sum())
+            assert q[castle, s] == pytest.approx(exact)
+
+
+def test_game2_response_wins_everything_against_equal_split():
+    rng = np.random.default_rng(16)
+    r = c.game2_response(c.field_from_samples([c.EQUAL_SPLIT]), rng, n_groups=200)
+    assert r.values.max() == 9
+
+
+def test_local_search_and_annealing_climb():
+    rng = np.random.default_rng(17)
+    field = c.field_from_samples(c.level0_sample("focal", 20_000, rng))
+    opp = c.face(c.sample_opponents(field, 2000, rng))
+    start_value = c.payouts(c.EQUAL_SPLIT, opp).mean()
+    best, value = c.local_search(c.EQUAL_SPLIT, opp)
+    assert value > start_value + 1
+    neighbors = best + c._MOVES
+    neighbors = neighbors[(neighbors >= 0).all(axis=1)]
+    assert c.payouts(neighbors, opp).mean(axis=1).max() <= value  # a true local optimum
+    annealed, annealed_value = c.anneal(c.EQUAL_SPLIT, opp, 400, rng)
+    assert annealed_value == pytest.approx(c.payouts(annealed, opp).mean())
+    assert annealed_value > start_value
+
+
+def test_logit_field_and_mixing():
+    r = c.Game2Response(np.array([[20, 20, 20, 20, 20], [0, 0, 40, 0, 60]]), np.array([3.0, 5.0]))
+    assert c.logit_field(r, np.inf).allocs.tolist() == [[0, 0, 40, 0, 60]]
+    np.testing.assert_allclose(c.logit_field(r, 0.0).probs, [0.5, 0.5])
+    np.testing.assert_allclose(c.logit_field(r, 1.0).probs, np.exp([-2, 0]) / np.exp([-2, 0]).sum())
+    mixed = c.mix_fields([(3, c.logit_field(r, 0.0)), (1, c.field_from_samples([c.EQUAL_SPLIT])), (0, r)])
+    np.testing.assert_allclose(mixed.probs, [0.375, 0.375, 0.25])
+
+
+def test_replicator_drives_out_a_dominated_plan():
+    rng = np.random.default_rng(18)
+    pool = np.array([c.EQUAL_SPLIT, [16, 21, 21, 21, 21]])
+    mix = c.replicator(pool, rng, steps=100, n_groups=500)
+    assert mix.probs[1] > 0.9

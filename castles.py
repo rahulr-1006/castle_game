@@ -384,3 +384,203 @@ def cognitive_hierarchy(level0_marg, tau, lam, max_level):
         belief = np.tensordot(shares[:k] / shares[:k].sum(), np.array(levels), axes=1)
         levels.append(noisy_response(win_value(belief), lam))
     return np.array(levels)
+
+
+# ---------------------------------------------------------------------------
+# Game 2 simulator
+#
+# Fact 3: castle points always total 15, so a player with more than 7.5 points
+# finishes outright 1st: the other three share less than 7.5. Sweeping any castle
+# set worth 8 or more ({5,3}, {5,4}, {5,2,1}, {4,3,1}, {4,3,2} are the minimal
+# ones) therefore guarantees the 9-point payout, whatever happens elsewhere.
+# ---------------------------------------------------------------------------
+
+class Field(NamedTuple):
+    """A population of players as a discrete distribution over allocations."""
+    allocs: np.ndarray  # (N, 5)
+    probs: np.ndarray   # (N,), sums to 1
+
+
+def field_from_samples(allocs):
+    allocs = validate(allocs).reshape(-1, N_CASTLES)
+    return Field(allocs, np.full(len(allocs), 1 / len(allocs)))
+
+
+def mix_fields(parts):
+    """Mixture of fields from (weight, Field) pairs; weights are renormalized."""
+    parts = [(w, f) for w, f in parts if w > 0]
+    total = sum(w for w, _ in parts)
+    return Field(np.concatenate([f.allocs for _, f in parts]),
+                 np.concatenate([w / total * f.probs for w, f in parts]))
+
+
+def field_marginals(field):
+    return marginals(field.allocs, field.probs)
+
+
+def sample_opponents(field, n_groups, rng):
+    """The other three players in each of n_groups random groups, shape (n_groups, 3, 5)."""
+    idx = rng.choice(len(field.probs), size=(n_groups, GROUP_SIZE - 1), p=field.probs)
+    return field.allocs[idx]
+
+
+class Opponents(NamedTuple):
+    """Fixed opponent groups, preprocessed so a candidate is scored without re-ranking."""
+    top: np.ndarray         # (G, 5) most soldiers any opponent sends to each castle
+    at_top: np.ndarray      # (G, 3, 5) which opponents send that many
+    lose_share: np.ndarray  # (G, 5) twelfths each top opponent gets if I send fewer
+    tie_share: np.ndarray   # (G, 5) twelfths each top opponent (and I) get if I tie the top
+
+
+def face(opponent_allocs):
+    o = np.asarray(opponent_allocs)
+    top = o.max(axis=1)
+    at_top = o == top[:, None, :]
+    n_top = at_top.sum(axis=1)
+    v = SCALE * VALUES
+    return Opponents(top, at_top.astype(np.int32), (v // n_top).astype(np.int32),
+                     (v // (n_top + 1)).astype(np.int32))
+
+
+def payouts(candidates, opp, max_cells=2_000_000):
+    """Payout of each candidate in each fixed group, shape (B, G).
+
+    Every candidate faces the same groups (common random numbers), so differences
+    between candidates carry far less noise than their separate averages.
+    """
+    cands = np.atleast_2d(candidates)
+    n_groups = len(opp.top)
+    chunk = max(1, max_cells // n_groups)
+    out = np.empty((len(cands), n_groups))
+    v = (SCALE * VALUES).astype(np.int32)
+    for start in range(0, len(cands), chunk):
+        a = cands[start:start + chunk, None, :]
+        win = a > opp.top
+        tie = a == opp.top
+        mine = (win * v + tie * opp.tie_share).sum(axis=-1)
+        award = np.where(win, 0, np.where(tie, opp.tie_share, opp.lose_share))
+        theirs = np.stack([(award * opp.at_top[:, j]).sum(axis=-1) for j in range(GROUP_SIZE - 1)], axis=-1)
+        ahead = (theirs > mine[..., None]).sum(axis=-1)
+        tied = 1 + (theirs == mine[..., None]).sum(axis=-1)
+        out[start:start + chunk] = (_PAYOUT_CUMSUM[ahead + tied] - _PAYOUT_CUMSUM[ahead]) / tied
+    return out
+
+
+def castle_share_4way(marg):
+    """q[i, s]: expected share of castle i won by sending s against 3 opponents from the field.
+
+    Exact for one castle, since the three opponents are independent players:
+    j of them tie my s and the rest send less with probability C(3, j) p^j F^(3-j).
+    """
+    below = np.cumsum(marg, axis=1) - marg
+    return sum(math.comb(3, j) * marg**j * below ** (3 - j) / (1 + j) for j in range(4))
+
+
+def game2_plans(marg):
+    """Seed allocations for the Game 2 best-response search, tuned to a field.
+
+    One plan per castle subset S: the DP maximizes sum over S of log q_i(a_i), the
+    chance of sweeping S if castles were independent, with leftovers sent to expected
+    points elsewhere. Plus the expected-points plan and the Game 1 best response.
+    """
+    q = castle_share_4way(marg)
+    points = VALUES[:, None] * q
+    log_q = np.log(np.maximum(q, 1e-12))
+    plans = [best_response(points)[0], best_response(win_value(marg))[0]]
+    for mask in range(1, 2**N_CASTLES):
+        in_set = (mask >> np.arange(N_CASTLES)) & 1 == 1
+        plans.append(best_response(np.where(in_set[:, None], log_q, 1e-3 * points))[0])
+    return np.unique(plans, axis=0)
+
+
+# Every way to move 1-5 soldiers from one castle to another.
+_MOVES = np.array([
+    d * (np.eye(N_CASTLES, dtype=np.int64)[j] - np.eye(N_CASTLES, dtype=np.int64)[i])
+    for i in range(N_CASTLES) for j in range(N_CASTLES) if i != j for d in range(1, 6)
+])
+
+
+def local_search(start, opp, max_steps=1000):
+    """Steepest ascent on mean payout against fixed groups, moving 1-5 soldiers at a time."""
+    current = validate(start)
+    value = payouts(current, opp).mean()
+    for _ in range(max_steps):
+        neighbors = current + _MOVES
+        neighbors = neighbors[(neighbors >= 0).all(axis=1)]
+        values = payouts(neighbors, opp).mean(axis=1)
+        k = values.argmax()
+        if values[k] <= value:
+            break
+        current, value = neighbors[k], values[k]
+    return current, float(value)
+
+
+def anneal(start, opp, steps, rng, temp=0.05):
+    """Simulated annealing on mean payout against fixed groups; returns the best seen.
+
+    Temperature falls linearly from `temp` (payout units) to zero, so early on it
+    accepts moves that lose a little in order to escape local optima.
+    """
+    current = validate(start)
+    value = payouts(current, opp).mean()
+    best, best_value = current, value
+    for step in range(steps):
+        cand = current + _MOVES[rng.integers(len(_MOVES))]
+        if (cand < 0).any():
+            continue
+        cand_value = payouts(cand, opp).mean()
+        heat = temp * (1 - step / steps)
+        if cand_value >= value or rng.random() < np.exp((cand_value - value) / max(heat, 1e-12)):
+            current, value = cand, cand_value
+            if value > best_value:
+                best, best_value = current, value
+    return best, float(best_value)
+
+
+class Game2Response(NamedTuple):
+    plans: np.ndarray   # (P, 5) distinct plans considered
+    values: np.ndarray  # (P,) mean payout of each against the target field
+
+
+def game2_response(field, rng, n_groups=4000, polish=True):
+    """Approximate Game 2 best response to a field.
+
+    No DP exists here (the ranking couples castles), so DP-seeded plans are scored
+    by simulation and the best one is polished by local search.
+    """
+    opp = face(sample_opponents(field, n_groups, rng))
+    plans = game2_plans(field_marginals(field))
+    values = payouts(plans, opp).mean(axis=1)
+    if polish:
+        k = values.argmax()
+        plans[k], values[k] = local_search(plans[k], opp)
+        plans, keep = np.unique(plans, axis=0, return_index=True)
+        values = values[keep]
+    return Game2Response(plans, values)
+
+
+def logit_field(response, lam):
+    """Noisy Game 2 best response: logit over the considered plans (lam in 1/payout)."""
+    if np.isinf(lam):
+        return Field(response.plans[[response.values.argmax()]], np.ones(1))
+    p = np.exp(lam * (response.values - response.values.max()))
+    return Field(response.plans, p / p.sum())
+
+
+def replicator(pool, rng, steps=300, n_groups=3000, eta=2.0, mutation=0.002):
+    """Noisy replicator dynamics over a pool of Game 2 allocations.
+
+    Each step re-weights the pool by exp(eta * payoff advantage) against groups
+    drawn from the current mix, then mixes in a little uniform noise so no plan
+    dies out for good. Returns the time-averaged mix, an approximate symmetric
+    equilibrium; its quality is checked by its exploitability, not assumed.
+    """
+    x = np.full(len(pool), 1 / len(pool))
+    avg = np.zeros_like(x)
+    for _ in range(steps):
+        opp = face(sample_opponents(Field(pool, x), n_groups, rng))
+        u = payouts(pool, opp).mean(axis=1)
+        x = x * np.exp(eta * (u - u @ x))
+        x = (1 - mutation) * x / x.sum() + mutation / len(pool)
+        avg += x
+    return Field(pool, avg / steps)
