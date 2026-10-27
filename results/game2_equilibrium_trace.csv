@@ -1,0 +1,10 @@
+method,rounds,exploitability
+fictitious play,10,5.25
+fictitious play,20,5.25
+fictitious play,41,5.019583333333333
+fictitious play,85,2.5259166666666664
+fictitious play,175,0.9934166666666666
+fictitious play,358,0.6254166666666663
+fictitious play,733,0.4649166666666664
+fictitious play,1500,0.37675000000000036
+replicator on plan pool,300,3.736583333333333

@@ -450,3 +450,11 @@ def test_replicator_drives_out_a_dominated_plan():
     pool = np.array([c.EQUAL_SPLIT, [16, 21, 21, 21, 21]])
     mix = c.replicator(pool, rng, steps=100, n_groups=500)
     assert mix.probs[1] > 0.9
+
+
+def test_game2_fictitious_play_reduces_exploitability():
+    rng = np.random.default_rng(19)
+    plays, gaps = c.fictitious_play_game2(150, rng, n_groups=1000, checkpoints=(10, 150))
+    assert len(plays) == 151
+    c.validate(plays)
+    assert gaps[150] < gaps[10] - 1

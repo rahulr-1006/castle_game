@@ -1,0 +1,4 @@
+from,to,tau
+"sweep {2, 5}: DP vs prior field",expected points vs 3 (DP),0.6671714656254816
+expected points vs 3 (DP),"local search from sweep {3, 4}: DP vs prior field",1.8129456372594723
+"local search from sweep {3, 4}: DP vs prior field",expected points vs 3 (DP),2.811315808040477

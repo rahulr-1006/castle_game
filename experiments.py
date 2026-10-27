@@ -110,14 +110,15 @@ class Sizes(NamedTuple):
     level0_game1: int    # samples behind each level-0 flavor's Game 1 marginals
     level0_game2: int    # allocations kept as each Game 2 level-0 field
     br_groups: int       # groups per Game 2 best-response search
-    eq_steps: int        # replicator steps per double-oracle round
+    eq_rounds: int       # fictitious play rounds for the Game 2 equilibrium
+    eq_steps: int        # replicator steps (comparison only)
     search_groups: int   # prior-mixture groups for the Game 2 candidate search
     anneal_steps: int
     eval_groups: int     # groups per candidate per world in the final comparison
 
 
-FULL = Sizes(100_000, 400_000, 60_000, 4000, 300, 40_000, 3000, 20_000)
-QUICK = Sizes(5_000, 50_000, 10_000, 800, 30, 4000, 150, 1500)
+FULL = Sizes(100_000, 400_000, 60_000, 4000, 1500, 300, 40_000, 3000, 20_000)
+QUICK = Sizes(5_000, 50_000, 10_000, 800, 60, 30, 4000, 150, 1500)
 
 _START = time.time()
 
@@ -346,17 +347,17 @@ def game2_levels(level0_field, lam, rng, sizes):
     return by_tau, responses
 
 
-def game2_equilibrium(pool, rng, sizes, rounds=3):
-    """Double oracle: replicator dynamics on the pool, then add a best response to it."""
-    trace = []
-    for _ in range(rounds):
-        eq = c.replicator(pool, rng, steps=sizes.eq_steps, n_groups=sizes.br_groups // 2)
-        br = c.game2_response(eq, rng, sizes.br_groups)
-        trace.append({"pool_size": len(pool), "exploitability": br.values.max() - 3.75,
-                      "best_response": fmt(br.plans[br.values.argmax()])})
-        pool = np.unique(np.vstack([pool, top_plans(br, 3)]), axis=0)
-    keep = eq.probs > 1e-4
-    return c.Field(eq.allocs[keep], eq.probs[keep] / eq.probs[keep].sum()), pd.DataFrame(trace)
+def game2_equilibrium(pool, rng, sizes):
+    """Approximate Game 2 equilibrium by fictitious play; replicator dynamics on a
+    fixed plan pool is run alongside as the comparison that motivated it."""
+    marks = sorted({int(x) for x in np.geomspace(10, sizes.eq_rounds, 8)})
+    plays, gaps = c.fictitious_play_game2(sizes.eq_rounds, rng, sizes.br_groups // 2, marks)
+    trace = [{"method": "fictitious play", "rounds": t, "exploitability": g} for t, g in gaps.items()]
+    rep = c.replicator(pool, rng, steps=sizes.eq_steps, n_groups=sizes.br_groups // 2)
+    br = c.game2_response(rep, rng, 3 * sizes.br_groups // 2)
+    trace.append({"method": "replicator on plan pool", "rounds": sizes.eq_steps,
+                  "exploitability": br.values.max() - 3.75})
+    return c.field_from_samples(plays), pd.DataFrame(trace)
 
 
 def concentrate(alloc, drop):
@@ -381,13 +382,14 @@ def run_game2(worlds, rng, sizes, g1):
             ch[f, n, tau] = levels
     log(f"  {len(responses)} best responses")
 
-    log("Game 2: approximate equilibrium (replicator dynamics + double oracle)")
+    log("Game 2: approximate equilibrium (fictitious play)")
     pool = np.unique(np.vstack([top_plans(r, 3) for r in responses] + [g1["cands"].array()]), axis=0)
     eq_field, eq_trace = game2_equilibrium(pool, rng, sizes)
     eq_trace.to_csv(RESULTS / "game2_equilibrium_trace.csv", index=False)
-    pd.DataFrame({"allocation": [fmt(a) for a in eq_field.allocs], "prob": eq_field.probs}).sort_values(
-        "prob", ascending=False).to_csv(RESULTS / "game2_equilibrium_mix.csv", index=False)
-    log(f"  exploitability by round: {eq_trace['exploitability'].round(3).tolist()}")
+    pd.DataFrame(eq_field.allocs, columns=[f"castle_{i}" for i in c.VALUES]).to_csv(
+        RESULTS / "game2_equilibrium_plays.csv", index=False)
+    log("  exploitability: " + ", ".join(
+        f"{r.method} {r.rounds}: {r.exploitability:.3f}" for r in eq_trace.itertuples()))
 
     log("Game 2: meta exploiters and world fields")
     fields, exploiters = [], {}
@@ -494,10 +496,94 @@ def noise_calibration(rng):
     return pd.DataFrame(rows)
 
 
+# ---------------------------------------------------------------------------
+# Plots (read back from the CSVs, so --plots-only can redraw them)
+# ---------------------------------------------------------------------------
+
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a"]  # first three categorical slots, all-pairs safe
+INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
+
+
+def _style(ax, title, xlabel, ylabel):
+    ax.set_title(title, loc="left", fontsize=11, color=INK)
+    ax.set_xlabel(xlabel, color=MUTED)
+    ax.set_ylabel(ylabel, color=MUTED)
+    ax.grid(color=GRID, linewidth=0.8)
+    ax.tick_params(colors=MUTED, labelsize=9)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(GRID)
+
+
+def _crossover_plot(ax, table, names, title, ylabel, optimum=None):
+    for color, name in zip(SERIES, names):
+        ax.plot(table["tau"], table[name], color=color, linewidth=2, marker="o", markersize=4,
+                label=name)
+    if optimum is not None:
+        ax.plot(table["tau"], optimum, color=MUTED, linewidth=1.2, linestyle="--",
+                label="best possible at each tau")
+    _style(ax, title, "tau (mean thinking depth of the field)", ylabel)
+    ax.legend(frameon=False, fontsize=8, labelcolor=MUTED)
+
+
+def make_plots():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plt.rcParams.update({"font.size": 9, "figure.dpi": 150})
+
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(10, 3.6))
+    fp = pd.read_csv(RESULTS / "fp_convergence.csv")
+    a1.loglog(fp["round"], fp["exploitability"], color=SERIES[0], linewidth=2)
+    _style(a1, "Game 1: fictitious play converges", "round", "best-response gain (points)")
+    eq = pd.read_csv(RESULTS / "game1_equilibrium_marginals.csv")
+    for color, castle in zip(SERIES, (3, 4, 5)):
+        a2.plot(eq["soldiers"], eq[f"castle_{castle}"].cumsum(), color=color, linewidth=2,
+                label=f"castle {castle}")
+        top = 200 * castle / 15
+        a2.plot([0, top, 100], [0, 1, 1], color=MUTED, linewidth=1, linestyle="--")
+    a2.plot([], [], color=MUTED, linewidth=1, linestyle="--", label="Gross-Wagner (continuous)")
+    _style(a2, "Game 1 equilibrium vs theory", "soldiers sent", "cumulative probability")
+    a2.legend(frameon=False, fontsize=8, labelcolor=MUTED)
+    fig.tight_layout()
+    fig.savefig(RESULTS / "equilibrium.png")
+    plt.close(fig)
+
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4))
+    g1 = pd.read_csv(RESULTS / "game1_candidates.csv")
+    cross1 = pd.read_csv(RESULTS / "game1_crossover.csv")
+    _crossover_plot(a1, cross1, g1["candidate"].head(3).tolist(), "Game 1: score vs field depth",
+                    "expected score (0-15)", cross1["optimum_score"])
+    g2 = pd.read_csv(RESULTS / "game2_candidates.csv")
+    cross2 = pd.read_csv(RESULTS / "game2_crossover.csv")
+    _crossover_plot(a2, cross2, g2["candidate"].head(3).tolist(), "Game 2: payout vs field depth",
+                    "expected payout (0-9)")
+    fig.tight_layout()
+    fig.savefig(RESULTS / "crossover.png")
+    plt.close(fig)
+
+    focal = pd.read_csv(RESULTS / "game1_focal_steps.csv")
+    fig, axes = plt.subplots(1, 5, figsize=(12, 2.8), sharey=True)
+    for ax, (castle, rows) in zip(axes, focal.groupby("castle")):
+        ax.bar(rows["to"], rows["gain_points"], width=0.9, color=SERIES[0])
+        _style(ax, f"castle {castle}", "soldiers (s to s+1)", "points gained" if castle == 1 else "")
+    fig.suptitle("Game 1: what one more soldier is worth under the prior (spikes sit just above "
+                 "crowded numbers)", x=0.01, ha="left", fontsize=11, color=INK)
+    fig.tight_layout()
+    fig.savefig(RESULTS / "focal_points.png")
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--quick", action="store_true", help="small samples for a fast smoke test")
+    parser.add_argument("--plots-only", action="store_true", help="redraw plots from results/")
     args = parser.parse_args()
+    if args.plots_only:
+        make_plots()
+        return
     sizes = QUICK if args.quick else FULL
     RESULTS.mkdir(exist_ok=True)
     rng = np.random.default_rng(SEED)
@@ -520,6 +606,7 @@ def main():
                                                             "p_outright_first", "worst_score",
                                                             "max_regret"]].head(12).to_string(index=False))
     print("\nGame 2 crossovers\n", g2["switches"].to_string(index=False))
+    make_plots()
     log("done")
 
 

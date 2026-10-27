@@ -598,3 +598,22 @@ def replicator(pool, rng, steps=300, n_groups=3000, eta=2.0, mutation=0.002):
         x = (1 - mutation) * x / x.sum() + mutation / len(pool)
         avg += x
     return Field(pool, avg / steps)
+
+
+def fictitious_play_game2(n_iter, rng, n_groups=2000, checkpoints=()):
+    """Symmetric fictitious play for Game 2 with the search-based best response.
+
+    Each round adds an approximate best response to the uniform mix of all earlier
+    plays. Returns the plays and, at each checkpoint round, the exploitability of
+    the mix so far (best-response payout minus the symmetric value 3.75), measured
+    on fresh groups. The oracle is approximate, so that is a lower bound.
+    """
+    plays = [EQUAL_SPLIT.copy()]
+    gaps = {}
+    for t in range(1, n_iter + 1):
+        r = game2_response(field_from_samples(np.array(plays)), rng, n_groups)
+        plays.append(r.plans[r.values.argmax()])
+        if t in checkpoints:
+            check = game2_response(field_from_samples(np.array(plays)), rng, 3 * n_groups)
+            gaps[t] = check.values.max() - TOTAL_POINTS / GROUP_SIZE
+    return np.array(plays), gaps
