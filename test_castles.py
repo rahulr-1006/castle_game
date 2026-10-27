@@ -329,7 +329,7 @@ def test_fictitious_play_matches_gross_wagner():
 
 def test_level0_habits_are_legal():
     rng = np.random.default_rng(11)
-    for habit, draw in c.LEVEL0_HABITS.items():
+    for draw in c.LEVEL0_HABITS.values():
         c.validate(draw(2000, rng))
     assert (c.level0_round_numbers(2000, rng) % 5 == 0).all()
     assert set(c.level0_stack_five(2000, rng)[:, 4]) == {40, 50, 60}

@@ -169,7 +169,9 @@ def win_value(marg):
 def expected_score(w, allocs):
     """Expected Game 1 score of each allocation in `allocs` given a win-value table."""
     a = np.asarray(allocs)
-    return w[np.arange(w.shape[0]), a].sum(axis=-1)
+    # One gather per castle: scoring all 4.6M allocations this way never builds
+    # the (4.6M, 5) float temporary that fancy-indexing w directly would.
+    return sum(w[i][a[..., i]] for i in range(w.shape[0]))
 
 
 @functools.lru_cache(maxsize=4)
@@ -476,20 +478,32 @@ def castle_share_4way(marg):
     return sum(math.comb(3, j) * marg**j * below ** (3 - j) / (1 + j) for j in range(4))
 
 
+def sweep_plan(marg, castle_set):
+    """Allocation with the best chance of sweeping `castle_set` (castle numbers 1-5).
+
+    The DP maximizes the sum over the set of log q_i(a_i), which is the chance of
+    winning every castle in it if castles were independent. Leftover soldiers go to
+    expected points elsewhere, at a weight too small to ever pull them out of the set.
+    """
+    q = castle_share_4way(marg)
+    in_set = np.isin(np.arange(1, N_CASTLES + 1), list(castle_set))
+    w = np.where(in_set[:, None], np.log(np.maximum(q, 1e-12)), 1e-3 * VALUES[:, None] * q)
+    return best_response(w)[0]
+
+
+CASTLE_SETS = [s for r in range(1, N_CASTLES + 1)
+               for s in itertools.combinations(range(1, N_CASTLES + 1), r)]
+
+
 def game2_plans(marg):
     """Seed allocations for the Game 2 best-response search, tuned to a field.
 
-    One plan per castle subset S: the DP maximizes sum over S of log q_i(a_i), the
-    chance of sweeping S if castles were independent, with leftovers sent to expected
-    points elsewhere. Plus the expected-points plan and the Game 1 best response.
+    A sweep plan for each of the 31 castle subsets, plus the plan maximizing
+    expected castle points against 3 opponents and the Game 1 best response.
     """
-    q = castle_share_4way(marg)
-    points = VALUES[:, None] * q
-    log_q = np.log(np.maximum(q, 1e-12))
-    plans = [best_response(points)[0], best_response(win_value(marg))[0]]
-    for mask in range(1, 2**N_CASTLES):
-        in_set = (mask >> np.arange(N_CASTLES)) & 1 == 1
-        plans.append(best_response(np.where(in_set[:, None], log_q, 1e-3 * points))[0])
+    plans = [best_response(VALUES[:, None] * castle_share_4way(marg))[0],
+             best_response(win_value(marg))[0]]
+    plans += [sweep_plan(marg, s) for s in CASTLE_SETS]
     return np.unique(plans, axis=0)
 
 
