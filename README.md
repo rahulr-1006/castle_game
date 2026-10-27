@@ -74,7 +74,7 @@ change between games.
 ## One more layer
 
 Nobody in the model above anticipates the crowd-modelers. So I added **counter-players**: people
-who best-respond to the whole field, crowd-modelers included (think "the smart people all concede
+who best-respond to the whole field, crowd-modelers included (ex "the smart people all concede
 castle 5, so I'll steal it"). I swapped 10% or 25% of every world for them and re-solved.
 
 - **Game 1 holds up.** The best answer only shifts to 8-17-29-44-2 (10%) or 7-17-28-45-3 (25%),
