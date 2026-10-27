@@ -1,5 +1,4 @@
 from,to,tau
-level-k chain level 3,CH (tau=1.5) level 6,0.46303810910268756
-CH (tau=1.5) level 6,Bayes: best prior score,0.763849575256674
-Bayes: best prior score,"concede 5, focal+1",2.0548504379916084
-"concede 5, focal+1",minimax regret,2.3854952115663752
+level-k chain level 3,CH (tau=1.5) level 6,0.314902357729641
+CH (tau=1.5) level 6,"concede 5, focal+1",0.7502858396243552
+"concede 5, focal+1",Bayes: best prior score,0.98557097600341

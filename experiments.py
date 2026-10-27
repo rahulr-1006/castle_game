@@ -24,20 +24,53 @@ SEED = 2026
 # Worlds: each is one guess at who the other applicants are
 # ---------------------------------------------------------------------------
 
-TAUS = (0.5, 1.0, 1.5, 2.0, 3.0)
-EQ_SHARES = (0.0, 0.1, 0.25)
-META_SHARES = (0.0, 0.1, 0.25)
 LEVEL0 = ("focal", "random")
 # Inverse temperatures (Game 1 per castle point, Game 2 per payout point), set so a
 # strategic player facing the round-number crowd gives up about 3% ("low") or
 # 11-12% ("high") of the best achievable score. results/noise_calibration.csv
 # records the actual figures.
 NOISE = {"low": (8.0, 4.0), "high": (3.0, 1.0)}
-MAX_LEVEL = 6
+MAX_LEVEL = 8  # Poisson tail beyond this is pooled; it holds 2% of players at tau = 4
 
-# The prior over worlds. Axes are treated as independent; each weight carries
-# its reason. Edit here and rerun to see how the picks move.
-PRIOR = {
+# Priors over worlds. Axes are treated as independent; each weight carries its
+# reason. "sharp" is the main one (results/); "baseline" is my first, more
+# skeptical prior, kept for comparison (results/baseline/). Edit and rerun.
+PRIORS = {}
+PRIORS["sharp"] = {
+    # Mean thinking depth of the Poisson cognitive hierarchy. tau = 2.5 puts about
+    # half the thinkers at levels 2-3 and a quarter at 4+.
+    "tau": {
+        1.5: (0.10, "Floor: even a sharp pool has people who answer a 3-minute optional "
+                    "question quickly."),
+        2.0: (0.20, "Sharp applicants who stop at 'beat the people who beat the obvious "
+                    "split'."),
+        2.5: (0.35, "Core belief: Sequoia / OpenAI / Citadel draws a pool where most think "
+                    "2-3 levels deep."),
+        3.0: (0.25, "Priority registration rewards top scores, so many will think harder "
+                    "than usual."),
+        4.0: (0.10, "Tail: a pool where level 4+ is common."),
+    },
+    "eq": {
+        0.0: (0.25, "Even in a sharp pool, few recall the Blotto equilibrium under time "
+                    "pressure."),
+        0.1: (0.45, "Quant applicants who know the theory randomize around proportional."),
+        0.25: (0.30, "A pool selected for game theory has many equilibrium players."),
+    },
+    "meta": {
+        0.0: (0.15, "Unlikely that nobody models the crowd in a pool this competitive."),
+        0.1: (0.45, "A motivated minority models the field for priority registration."),
+        0.25: (0.40, "Sharp pool: many will do some version of this analysis."),
+    },
+    "level0": {
+        "focal": (0.80, "Whoever doesn't think still piles onto round numbers."),
+        "random": (0.20, "Textbook uniform level 0, kept as a stress test."),
+    },
+    "noise": {
+        "low": (0.60, "Sharp players mostly get their arithmetic right."),
+        "high": (0.40, "Three minutes still makes some of them sloppy."),
+    },
+}
+PRIORS["baseline"] = {
     # Mean thinking depth of the Poisson cognitive hierarchy.
     "tau": {
         0.5: (0.15, "Optional 3-minute question: many applicants answer on autopilot."),
@@ -90,7 +123,20 @@ class World(NamedTuple):
                 f"L0={self.level0} noise={self.noise}")
 
 
-def build_worlds(prior=PRIOR):
+PRIOR = PRIORS["sharp"]
+TAUS = tuple(sorted(PRIOR["tau"]))
+
+
+def use_prior(name):
+    """Point the module at a named prior and its results folder."""
+    global PRIOR, TAUS, RESULTS
+    PRIOR = PRIORS[name]
+    TAUS = tuple(sorted(PRIOR["tau"]))
+    RESULTS = Path(__file__).resolve().parent / "results" / ("" if name == "sharp" else name)
+
+
+def build_worlds(prior=None):
+    prior = PRIOR if prior is None else prior
     for axis, weights in prior.items():
         total = sum(w for w, _ in weights.values())
         assert abs(total - 1) < 1e-9, f"prior weights for {axis} sum to {total}"
@@ -296,7 +342,7 @@ def run_game1(worlds, rng, sizes):
         RESULTS / "game1_scores_by_world.csv")
 
     log("Game 1: tau sweep for crossovers")
-    taus = np.round(np.arange(0.25, 3.51, 0.125), 3)
+    taus = np.round(np.arange(0.25, max(TAUS) + 0.51, 0.125), 3)
     sweep = game1_tau_sweep(level0, fp.marginals, cands.array(), taus)
     crossover = pd.DataFrame([dict(zip(cands.names, s)) | {"tau": t} for t, s, _, _ in sweep])
     leaders, switches = best_by_tau(crossover, cands.names)
@@ -580,12 +626,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--quick", action="store_true", help="small samples for a fast smoke test")
     parser.add_argument("--plots-only", action="store_true", help="redraw plots from results/")
+    parser.add_argument("--prior", choices=sorted(PRIORS), default="sharp",
+                        help="which prior to use (default: sharp)")
     args = parser.parse_args()
+    use_prior(args.prior)
     if args.plots_only:
         make_plots()
         return
     sizes = QUICK if args.quick else FULL
-    RESULTS.mkdir(exist_ok=True)
+    RESULTS.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(SEED)
     worlds = build_worlds()
     pd.DataFrame([
